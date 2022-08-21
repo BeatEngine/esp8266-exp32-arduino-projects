@@ -2,8 +2,8 @@
 
 //WIFI AccessPoint
 #include <ESP8266WiFi.h>
-#define ssid "YOURremoteControl"
-#define password "yOurPassword"
+#define ssid "WiFiName"
+#define password "wIfiPassword"
 #define AP_CHANNEL 1
 #define AP_MAX_CON 4
 #define AP_HIDDEN false
@@ -141,18 +141,17 @@ void checkTimeout()
   if(currentAction == 1)
   {
     //OPEN
-    unsigned long sum = sumOpenTime + (millis()-topenBegin);
+    unsigned long sum = sumOpenTime + (millis()-topenBegin) - sumCloseTime;
     if(sum >= MAX_TIME_OPEN)
     {
       actionStop();
-      sumCloseTime = 0;
     }
   }
   else if(currentAction == 2)
   {
     //CLOSE
     unsigned long sum = sumCloseTime + (millis()-tcloseBegin);
-    if(sum >= MAX_TIME_CLOSE | sum >= (1000+sumOpenTime))
+    if(sum >= (1000+sumOpenTime))
     {
       actionStop();
       sumOpenTime = 0;
