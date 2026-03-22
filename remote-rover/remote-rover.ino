@@ -225,14 +225,66 @@ void stopDriving()
     analogWrite(P4, 0);
 }
 
+void recoverI2CBus() {
+ Serial.println("--- EMERGENCY I2C RECOVERY START ---");
+  
+  // 1. Kill the I2C peripheral
+  Wire.end(); 
+  
+  // 2. Force SCL and SDA to be outputs
+  pinMode(21, OUTPUT); // SDA
+  pinMode(22, OUTPUT); // SCL
+  
+  // 3. Toggle SCL 9 times (Standard I2C recovery sequence)
+  // This tells any stuck slave to finish its current byte
+  for (int i = 0; i < 9; i++) {
+    digitalWrite(22, LOW);
+    delayMicroseconds(10);
+    digitalWrite(22, HIGH);
+    delayMicroseconds(10);
+  }
+
+  // 4. Send a STOP signal manually
+  digitalWrite(21, LOW);
+  delayMicroseconds(10);
+  digitalWrite(22, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(21, HIGH);
+  
+  // 5. Restart Wire
+  Wire.begin(21, 22);
+  Wire.setClock(100000); // Drop to 100kHz for stability
+  Wire.setTimeOut(150);    // Don't let it hang the CPU
+  
+  // 6. Re-initialize your specific sensor
+  delay(100);
+  if(!infraredFront.init())
+  {
+      Serial.println("Init infrared sonsor!");
+  }
+  delay(100);
+  infraredFront.setMeasurementTimingBudget(20000);
+  delay(50);
+}
+
 int getDistanceSafe() {
-  for (int i = 0; i < 3; i++) { // Try up to 2 times
+  bool rec = true;
+  while(true)
+  {
+  for (int i = 0; i < 2; i++) { // Try up to 2 times
     int val = infraredFront.readRangeSingleMillimeters();
     if (!infraredFront.timeoutOccurred()) {
       return val; // Success!
     }
     Serial.println("Infrared NACK detected, retrying...");
     delay(30); // Short breather
+  }
+  if(!rec)
+  {
+    break;
+  }
+  recoverI2CBus();
+  rec = false;
   }
   return -1; // Total failure
 }
@@ -244,9 +296,9 @@ bool checkFrontDistanceSensor(int x = lastX, int y = lastY)
     Serial.println("I2C Error: Sensor timed out!");
     return false; 
   }
-  if(y > 0 && d < 100 && d>0)
+  if(y > 0 && d < 150 && d>0)
   {
-    Serial.println("Barriere: " + String(d));
+    Serial.print("Barriere: "); Serial.println(d);
     int l = lastY;
     controlMotorByVector(x,-y);
     delay(500);
@@ -256,7 +308,7 @@ bool checkFrontDistanceSensor(int x = lastX, int y = lastY)
   }
   else if(y > 0 && d < 250 && d>0)
   {
-    Serial.println("Barriere: " + String(d));
+    Serial.print("Barriere: "); Serial.println(d);
     int l = lastY;
     controlMotorByVector(x,(int)(y/1.5));
     lastY = l;
@@ -329,6 +381,7 @@ void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType 
   switch (type) {
     case WS_EVT_CONNECT:
       Serial.printf("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
+      delay(50); // Give the power spike a moment to settle
       break;
     case WS_EVT_DISCONNECT:
       Serial.printf("WebSocket client #%u disconnected\n", client->id());
@@ -785,13 +838,8 @@ void setup() {
   while (!Serial) {
     ; // wait for serial port to connect. Needed for native USB port only
   }
-  Wire.begin(21, 22);
-  Wire.setTimeOut(150);
-  delay(50);
-  infraredFront.init();
-  delay(50);
-  infraredFront.setMeasurementTimingBudget(20000);
-
+  recoverI2CBus();
+  
   Serial.println("Access Point Web Server");
 
   pinMode(led, OUTPUT);      // set the LED pin mode
@@ -827,6 +875,7 @@ void setup() {
   // you're connected now, so print out the status
   printWiFiStatus();
   initWebSocket();
+  //esp_wifi_set_ps(WIFI_PS_NONE);
 
   // Route for root / web page
   server.on("/", HTTP_GET, [index_html](AsyncWebServerRequest *request){
