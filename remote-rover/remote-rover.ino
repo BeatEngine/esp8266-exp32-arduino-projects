@@ -1,5 +1,3 @@
-// ESP32-CAM GPIO Pin Definitions
-// ESP32-CAM GPIO Pin Definitions
 
 
 
@@ -51,14 +49,14 @@
 #define VP 36
 #define VN 39
 #define P34 34
-#define P35
-#define P32
-#define P33
-#define P25
-#define P26
-#define P27
-#define P14
-#define P12
+#define P35 35
+#define P32 32
+#define P33 33
+#define P25 25
+#define P26 26
+#define P27 27
+#define P14 14
+#define P12 12
 //GND
 #define P13 13
 #define D2 9
@@ -88,23 +86,34 @@
 #define D0 7
 #define CLK 6
 
+#define P3 3
+#define P1 1
+#include <Wire.h>
+#include <VL53L0X.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
+
+#include <ArduinoOTA.h>
 
 #define led 2
 
 const char ssid[] = "RoverDavid";        // your network SSID (name)
-const char pass[] = "rover";    // your network password (use for WPA, or use as key for WEP)
+const char pass[] = "roverdavid";    // your network password (use for WPA, or use as key for WEP)
 int keyIndex = 0;  
 
-unsigned long driveTimeout = 0;
+unsigned long driveTimeout = millis();
 
 // Create AsyncWebServer object on port 80
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 
 int status = WL_IDLE_STATUS;
+
+// InfraredDistance
+VL53L0X infraredFront;
+
 
 void notifyClients() {
  
@@ -131,11 +140,13 @@ inline float smooth(float min, float x)
 {
   return (1.0-min)*x*x;
 }
-
+int lastX = 0;
+int lastY = 0;
 // PINS 19,18 TL TR    5,17 BL BR
 void controlMotorByVector(int x, int y)
 {
-
+  lastX = x;
+  lastY = y;
   if(y >= 0)
   {
     analogWrite(P0, 0);
@@ -214,12 +225,54 @@ void stopDriving()
     analogWrite(P4, 0);
 }
 
-void checkTimeout()
+int getDistanceSafe() {
+  for (int i = 0; i < 3; i++) { // Try up to 2 times
+    int val = infraredFront.readRangeSingleMillimeters();
+    if (!infraredFront.timeoutOccurred()) {
+      return val; // Success!
+    }
+    Serial.println("Infrared NACK detected, retrying...");
+    delay(30); // Short breather
+  }
+  return -1; // Total failure
+}
+
+bool checkFrontDistanceSensor(int x = lastX, int y = lastY)
 {
-  if(millis()-driveTimeout > 1000)
+  int d = getDistanceSafe();
+  if (d == -1) {
+    Serial.println("I2C Error: Sensor timed out!");
+    return false; 
+  }
+  if(y > 0 && d < 100 && d>0)
+  {
+    Serial.println("Barriere: " + String(d));
+    int l = lastY;
+    controlMotorByVector(x,-y);
+    delay(500);
+    stopDriving();
+    lastY = 0;
+    return true;
+  }
+  else if(y > 0 && d < 250 && d>0)
+  {
+    Serial.println("Barriere: " + String(d));
+    int l = lastY;
+    controlMotorByVector(x,(int)(y/1.5));
+    lastY = l;
+    return true;
+  }
+  return false;
+}
+
+bool checkTimeout()
+{
+  if(millis()-driveTimeout >= 1100)
   {
     stopDriving();
+    return true;
   }
+  return false;
 }
 
 void keepAliveTimeout()
@@ -238,8 +291,17 @@ void processJoystick(String msg)
   //split(list, '|', values); // posx, posy, dirName, vecX, vecY
   int x = values[3].toInt();
   int y = values[4].toInt();
+
+  if(x > 0 || y > 0)
+  {
+    x = (int)((x+30)/1.3); // motor minimal move force
+    y = (int)((y+30)/1.3); // motor minimal move force
+  }
   //Serial.println("Control motor");
-  controlMotorByVector(x, y);
+  if(!checkFrontDistanceSensor(x, y))
+  {
+    controlMotorByVector(x, y);
+  }
 }
 const String KEEP_ALIVE = String("keep-alive");
 void handleWebSocketMessage(void *arg, uint8_t *data, size_t len) {
@@ -253,6 +315,7 @@ void handleWebSocketMessage(void *arg, uint8_t *data, size_t len) {
     // websocket.send('joystick:' + x + '|' + y + '|' + Joy3.GetPosDir() + '|' + Joy3.GetX() + '|' + Joy3.GetY());
     if (string_msg.startsWith("joystick:")) {
         processJoystick(string_msg);
+        keepAliveTimeout();
     }
     else if(KEEP_ALIVE == string_msg)
     {
@@ -283,55 +346,7 @@ void initWebSocket() {
   ws.onEvent(onEvent);
   server.addHandler(&ws);
 }
-
-String processor(const String& var){
-  Serial.println(var);
-  if(var == "STATE"){
-
-  }
-  return String();
-}
-
-
-
-void setup() {
-  analogWrite(P5, 0);
-  analogWrite(P17, 0);
-  analogWrite(P19, 0);
-  analogWrite(P18, 0);
-  analogWrite(P0, 0);
-  analogWrite(P2, 0);
-  analogWrite(P16, 0);
-  analogWrite(P4, 0);
-  WiFi.mode(WIFI_AP);
- //Initialize serial and wait for port to open:
-  Serial.begin(115200);
-  while (!Serial) {
-    ; // wait for serial port to connect. Needed for native USB port only
-  }
-
-  Serial.println("Access Point Web Server");
-
-  pinMode(led, OUTPUT);      // set the LED pin mode
-
-  // print the network name (SSID);
-  Serial.print("Creating access point named: ");
-  Serial.println(ssid);
-
-  // Create open network. Change this line if you want to create an WEP network:
-  bool wstatus = WiFi.softAP(ssid, pass);
-  if(!wstatus)
-  {
-    Serial.println("WIFI Failed!!!");
-  }
-
-  // wait 3 seconds for connection:
-  delay(1000);
-
-  // you're connected now, so print out the status
-  printWiFiStatus();
-  keepAliveTimeout();
-  initWebSocket();
+ 
 
 const String index_html = "<!DOCTYPE HTML><html> \
 <head> \
@@ -373,6 +388,7 @@ body \
 <link rel=\"icon\" href=\"data:,\"> \
 </head> \
 <body> \
+ <img style=\"top: 10px;width: 100%;\" src=\"/stream\"></img> \
   <div id=\"joy3Div\" style=\"width:200px;height:200px;margin:50px;position:fixed;bottom:30px;left:150px;\"></div> \
 		<div style=\"position:fixed;bottom:125px;left:750px; visibility: collapse;\"> \
 			Posizione X:<input id=\"joy3PosizioneX\" type=\"text\" style=\"visibility: collapse;\" /><br /> \
@@ -754,6 +770,63 @@ initWebSocket(); \
 </body> \
 </html> ";
 
+void setup() {
+  analogWrite(P5, 0);
+  analogWrite(P17, 0);
+  analogWrite(P19, 0);
+  analogWrite(P18, 0);
+  analogWrite(P0, 0);
+  analogWrite(P2, 0);
+  analogWrite(P16, 0);
+  analogWrite(P4, 0);
+  
+ //Initialize serial and wait for port to open:
+  Serial.begin(115200);
+  while (!Serial) {
+    ; // wait for serial port to connect. Needed for native USB port only
+  }
+  Wire.begin(21, 22);
+  Wire.setTimeOut(150);
+  delay(50);
+  infraredFront.init();
+  delay(50);
+  infraredFront.setMeasurementTimingBudget(20000);
+
+  Serial.println("Access Point Web Server");
+
+  pinMode(led, OUTPUT);      // set the LED pin mode
+
+  // print the network name (SSID);
+  Serial.print("Creating access point named: ");
+  Serial.println(ssid);
+  WiFi.mode(WIFI_AP);
+  if(WiFi.softAP(ssid, pass)) {
+    Serial.println("Access Point is Ready");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.softAPIP()); 
+  } else {
+    Serial.println("Failed to start AP");
+  }
+
+  /*wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  esp_wifi_init(&cfg);
+  esp_wifi_set_storage(WIFI_STORAGE_RAM);
+  esp_wifi_set_mode(WIFI_MODE_AP);
+  esp_wifi_set_protocol(WIFI_IF_AP, WIFI_PROTOCOL_11B);
+  //Create open network. Change this line if you want to create an WEP network:
+  bool wstatus = WiFi.softAP(ssid, pass);
+
+  if(!wstatus)
+  {
+    Serial.println("WIFI Failed!!!");
+  }*/
+
+  // wait 3 seconds for connection:
+  delay(1000);
+  keepAliveTimeout();
+  // you're connected now, so print out the status
+  printWiFiStatus();
+  initWebSocket();
 
   // Route for root / web page
   server.on("/", HTTP_GET, [index_html](AsyncWebServerRequest *request){
@@ -767,7 +840,33 @@ initWebSocket(); \
 
   // Start server
   server.begin();
+  // Over the air update
+  ArduinoOTA
+      .onStart([]() {
+        String type;
+        if (ArduinoOTA.getCommand() == U_FLASH)
+          type = "sketch";
+        else // U_SPIFFS
+          type = "filesystem";
 
+        // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
+        Serial.println("Start updating " + type);
+      })
+      .onEnd([]() {
+        Serial.println("\nEnd");
+      })
+      .onProgress([](unsigned int progress, unsigned int total) {
+        Serial.printf("Progress: %u%%   \r", (progress / (total / 100)));
+      })
+      .onError([](ota_error_t error) {
+        Serial.printf("Error[%u]: ", error);
+        if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+        else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+        else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+        else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+        else if (error == OTA_END_ERROR) Serial.println("End Failed");
+      });
+    ArduinoOTA.begin();
 }
 
 void loop() {
@@ -789,8 +888,10 @@ void loop() {
 
   ws.cleanupClients();
 
+  checkFrontDistanceSensor();
   checkTimeout();
-
+  delay(2);
+  ArduinoOTA.handle();
 }
 
 void printWiFiStatus() {
