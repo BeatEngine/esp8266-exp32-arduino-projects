@@ -225,94 +225,92 @@ void stopDriving()
     analogWrite(P4, 0);
 }
 
-void recoverI2CBus() {
- Serial.println("--- EMERGENCY I2C RECOVERY START ---");
-  
-  // 1. Kill the I2C peripheral
-  Wire.end(); 
-  
-  // 2. Force SCL and SDA to be outputs
-  pinMode(21, OUTPUT); // SDA
-  pinMode(22, OUTPUT); // SCL
-  
-  // 3. Toggle SCL 9 times (Standard I2C recovery sequence)
-  // This tells any stuck slave to finish its current byte
-  for (int i = 0; i < 9; i++) {
-    digitalWrite(22, LOW);
-    delayMicroseconds(10);
-    digitalWrite(22, HIGH);
-    delayMicroseconds(10);
-  }
+bool sensorEnabled = false;
 
-  // 4. Send a STOP signal manually
-  digitalWrite(21, LOW);
-  delayMicroseconds(10);
-  digitalWrite(22, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(21, HIGH);
+void connectInfrared() {
+  //Serial.println("--- INFRARED I2C START ---");
   
-  // 5. Restart Wire
-  Wire.begin(21, 22);
-  Wire.setClock(100000); // Drop to 100kHz for stability
-  Wire.setTimeOut(150);    // Don't let it hang the CPU
+  // Power up sensor pin if used as a power source
+  pinMode(14, OUTPUT);
+  digitalWrite(14, HIGH);
+  delay(10); // Give sensor more time to wake up
+
+  // Initialize Wire ONCE. No while loop.
+  Wire.begin(26, 27);
+  Wire.setClock(10000);
+  Wire.setTimeOut(200);
   
-  // 6. Re-initialize your specific sensor
-  delay(100);
-  if(!infraredFront.init())
-  {
-      Serial.println("Init infrared sonsor!");
+  // Use a timeout-protected initialization
+  // Most VL53L0X libraries return a boolean on init() or begin()
+  if (infraredFront.init()) {
+    Serial.println("Infrared Sensor Found!");
+    infraredFront.setMeasurementTimingBudget(20000);
+    sensorEnabled = true;
+  } else {
+    Serial.println("!!! SENSOR NOT FOUND - CONTINUING WITHOUT IT !!!");
+    sensorEnabled = false;
   }
-  delay(100);
-  infraredFront.setMeasurementTimingBudget(20000);
-  delay(50);
 }
 
-int getDistanceSafe() {
-  bool rec = true;
-  while(true)
-  {
-  for (int i = 0; i < 2; i++) { // Try up to 2 times
-    int val = infraredFront.readRangeSingleMillimeters();
-    if (!infraredFront.timeoutOccurred()) {
-      return val; // Success!
-    }
-    Serial.println("Infrared NACK detected, retrying...");
-    delay(30); // Short breather
-  }
-  if(!rec)
-  {
-    break;
-  }
-  recoverI2CBus();
-  rec = false;
-  }
-  return -1; // Total failure
+void disconnectInfrared() {
+  infraredFront.stopContinuous();
+  delay(10); // Give sensor more time to wake up
+  Wire.end();
+  delay(10); // Give sensor more time to wake up
+  pinMode(14, OUTPUT);
+  digitalWrite(14, LOW);
+  delay(10); // Give sensor more time to wake up
 }
+int lastd = -1;
+unsigned long senstime = 0;
+int getDistanceSafe(int sensortimeoutmilli) {
+  if (!sensorEnabled) return -1;
 
+  if(lastd != -1 && millis() - senstime < sensortimeoutmilli)
+  {
+    return lastd;
+  }
+
+  yield(); // This resets the watchdog and processes Wi-Fi
+  //WiFi.setTxPower(WIFI_POWER_8_5dBm);
+  //delay(50);
+  //connectInfrared();  
+  //delay(50);
+  senstime = millis();
+  int val = infraredFront.readRangeSingleMillimeters();
+  lastd = val;
+  //delay(200);
+  //disconnectInfrared();
+  //WiFi.setTxPower(WIFI_POWER_15dBm);
+  //delay(300);
+  return val;
+}
+bool anticollision = false;
 bool checkFrontDistanceSensor(int x = lastX, int y = lastY)
 {
-  int d = getDistanceSafe();
+  int d = getDistanceSafe(200);
   if (d == -1) {
     Serial.println("I2C Error: Sensor timed out!");
     return false; 
   }
-  if(y > 0 && d < 150 && d>0)
+  if(y > 0 && d < 250 && d>0)
   {
+    anticollision = true;
     Serial.print("Barriere: "); Serial.println(d);
     int l = lastY;
-    controlMotorByVector(x,-y);
-    delay(500);
-    stopDriving();
-    lastY = 0;
-    return true;
-  }
-  else if(y > 0 && d < 250 && d>0)
-  {
-    Serial.print("Barriere: "); Serial.println(d);
-    int l = lastY;
-    controlMotorByVector(x,(int)(y/1.5));
+    int yn = (int)(100.0*((d / 125.0) - 1.0));
+    if(d < 126)
+    {
+      yn = -100;
+    }
+    controlMotorByVector(x,yn);
     lastY = l;
     return true;
+  }
+  else if(anticollision)
+  {
+    controlMotorByVector(0,0);
+    anticollision = false;
   }
   return false;
 }
@@ -381,7 +379,6 @@ void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType 
   switch (type) {
     case WS_EVT_CONNECT:
       Serial.printf("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
-      delay(50); // Give the power spike a moment to settle
       break;
     case WS_EVT_DISCONNECT:
       Serial.printf("WebSocket client #%u disconnected\n", client->id());
@@ -838,8 +835,10 @@ void setup() {
   while (!Serial) {
     ; // wait for serial port to connect. Needed for native USB port only
   }
-  recoverI2CBus();
-  
+  delay(1000);
+  connectInfrared();  
+  delay(500);
+  yield();
   Serial.println("Access Point Web Server");
 
   pinMode(led, OUTPUT);      // set the LED pin mode
@@ -848,6 +847,7 @@ void setup() {
   Serial.print("Creating access point named: ");
   Serial.println(ssid);
   WiFi.mode(WIFI_AP);
+  WiFi.setTxPower(WIFI_POWER_15dBm);
   if(WiFi.softAP(ssid, pass)) {
     Serial.println("Access Point is Ready");
     Serial.print("IP Address: ");
@@ -870,7 +870,7 @@ void setup() {
   }*/
 
   // wait 3 seconds for connection:
-  delay(1000);
+  delay(50);
   keepAliveTimeout();
   // you're connected now, so print out the status
   printWiFiStatus();
@@ -883,12 +883,14 @@ void setup() {
     //index_html.getBytes(rawhtml, index_html.length());
     //const size_t rawsize = (size_t)index_html.length();
     request->send_P(200, "text/html", (uint8_t*)index_html.c_str(), (size_t)index_html.length());
+    //request->send(200, "text/html", index_html);
     //request->send(200, "/", index_html, false);  
   });
 
 
   // Start server
   server.begin();
+  delay(50);
   // Over the air update
   ArduinoOTA
       .onStart([]() {
@@ -916,6 +918,10 @@ void setup() {
         else if (error == OTA_END_ERROR) Serial.println("End Failed");
       });
     ArduinoOTA.begin();
+    delay(50);
+    //yield();
+    delay(1000);
+    //recoverI2CBus();
 }
 
 void loop() {
@@ -936,7 +942,6 @@ void loop() {
   }
 
   ws.cleanupClients();
-
   checkFrontDistanceSensor();
   checkTimeout();
   delay(2);
